@@ -1275,6 +1275,10 @@ A VELOCITY can also be specified instead of a VALUE. This velocity is
 converted to the 20bit TSTEP based value representation. Only use the VELOCITY
 argument for fields that represent velocities.
 
+#### SET_SERVO_CURRENT
+`SET_SERVO_CURRENT STEPPER=<name> CURRENT=<amps>`:
+This will adjust the current of the Servo42C driver.
+
 ### [toolhead]
 
 The toolhead module is automatically loaded.
