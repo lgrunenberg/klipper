@@ -14,46 +14,44 @@ ReadRegisters = {
     "PULSE_VALUE": {"addr": 0x33, "len": 6},
     "ERROR_VALUE": {"addr": 0x39, "len": 4},
     "EN_STATUS": {"addr": 0x3A, "len": 3},
-    "PROTECT_RELEASE": {"addr": 0x3D, "len": 3},
+    "LOCK_STATE": {"addr": 0x3D, "len": 3},
     "PROTECT_STATE": {"addr": 0x3E, "len": 3},
 }
 
-WriteRegisterAddrs = {
-    "CALIBRATE": 0x80,
-    "SET_CURRENT": 0x83,
-    "SET_MODE": 0x82,
-    "SET_MSTEP": 0x84,
-    "SET_EN": 0x85,
-    "SET_DIR": 0x86,
-    "SET_SDD": 0x87,
-    "SET_PROTECT": 0x88,
-    "SET_MPLYER": 0x89,
-    "RESTORE": 0x3F,
-    "SET_ADDR": 0x8B,
-    "SET_ZEROMODE": 0x90,
-    "SET_ZEROVAL": 0x91,
-    "SET_ZEROSPEED": 0x92,
-    "SET_ZERODIR": 0x93,
-    "GOTO_ZERO": 0x94,
-    "SET_KP": 0xA1,
-    "SET_KI": 0xA2,
-    "SET_KD": 0xA3,
-    "SET_ACC": 0xA4,
-    "SET_TORQ": 0xA5,
-    "UART_EN": 0xF3,
-    "UART_RUN": 0xF6,
-    "UART_STOP": 0xF7,
-    "UART_CLEAR": 0xFF,
-    "UART_MOVE": 0xFD,
+WriteRegisters = {
+    "CALIBRATE": {"addr": 0x80, "len": 4},
+    "SET_CURRENT": {"addr": 0x83, "len": 4},
+    "SET_MODE": {"addr": 0x82, "len": 4},
+    "SET_MSTEP": {"addr": 0x84, "len": 4},
+    "SET_EN": {"addr": 0x85, "len": 4},
+    "SET_DIR": {"addr": 0x86, "len": 4},
+    "SET_SDD": {"addr": 0x87, "len": 4},
+    "SET_LOCK": {"addr": 0x88, "len": 4},
+    "SET_MPLYER": {"addr": 0x89, "len": 4},
+    "RESTORE": {"addr": 0x3F, "len": 3},
+    "SET_ADDR": {"addr": 0x8B, "len": 4},
+    "SET_ZEROMODE": {"addr": 0x90, "len": 4},
+    "SET_ZEROVAL": {"addr": 0x91, "len": 4},
+    "SET_ZEROSPEED": {"addr": 0x92, "len": 4},
+    "SET_ZERODIR": {"addr": 0x93, "len": 4},
+    "GOTO_ZERO": {"addr": 0x94, "len": 4},
+    "SET_KP": {"addr": 0xA1, "len": 5},
+    "SET_KI": {"addr": 0xA2, "len": 5},
+    "SET_KD": {"addr": 0xA3, "len": 5},
+    "SET_ACC": {"addr": 0xA4, "len": 5},
+    "SET_TORQ": {"addr": 0xA5, "len": 5},
+    "UART_EN": {"addr": 0xF3, "len": 4},
+    "UART_RUN": {"addr": 0xF6, "len": 4},
+    "UART_STOP": {"addr": 0xF7, "len": 3},
+    "UART_CLEAR": {"addr": 0xFF, "len": 4},
+    "UART_MOVE": {"addr": 0xFD, "len": 8},
 }
 
-WriteRegisters = {
-    key: {"addr": hex(value)} for key, value in WriteRegisterAddrs.items()
-}
 
 Registers = dict(ReadRegisters, **WriteRegisters)
 
 MAX_CURRENT = 3.000
+MAX_TORQUE = 1200
 
 ######################################################################
 # SERVO42C printer object
@@ -69,6 +67,7 @@ class SERVO42C:
         self.stepper_name = " ".join(config.get_name().split()[1:])
         self.stepper_enable = self.printer.load_object(config, "stepper_enable")
         self.current = config.getfloat("current", above=0.0, maxval=MAX_CURRENT)
+        self.torque = config.getfloat("torque", above=0.0, maxval=MAX_TORQUE)
 
         gcode = self.printer.lookup_object("gcode")
         self.name = config.get_name().split()[-1]
@@ -84,6 +83,7 @@ class SERVO42C:
     def _handle_connect(self):
         try:
             self.set_current(self.current, None)
+            self.set_torque(self.torque, None)
         except self.printer.command_error as e:
             logging.info("Servo42C %s failed to init: %s", self.name, str(e))
 
@@ -92,10 +92,16 @@ class SERVO42C:
 
     def set_current(self, run_current, print_time):
         val = math.ceil(run_current / 0.2)
-        self.mcu_s42c.set_register("CURRENT", val, print_time)
+        self.mcu_s42c.set_register("SET_CURRENT", val, print_time)
         self.current = val * 0.2
         # Register commands
+
+    def set_torque(self, torque, print_time):
+        val = round(torque)
+        self.mcu_s42c.set_register("SET_TORQ", val, print_time)
+
     cmd_SET_SERVO_CURRENT_help = "Set the current of a Servo42C driver"
+
     def cmd_SET_SERVO_CURRENT(self, gcmd):
         prev_cur = self.get_current()
         run_current = gcmd.get_float("CURRENT", None, minval=0.0, maxval=MAX_CURRENT)
