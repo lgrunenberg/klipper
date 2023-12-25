@@ -80,7 +80,25 @@ class SERVO42C:
         )
         self.printer.register_event_handler("klippy:connect", self._handle_connect)
 
+    def _do_enable(self, print_time):
+        self.set_enable(True, print_time)
+
+    def _do_disable(self, print_time):
+        self.set_enable(False, print_time)
+
+    def _handle_stepper_enable(self, print_time, is_enable):
+        if is_enable:
+            cb = lambda ev: self._do_enable(print_time)
+        else:
+            cb = lambda ev: self._do_disable(print_time)
+        self.printer.get_reactor().register_callback(cb)
+
     def _handle_connect(self):
+        # Check for soft stepper enable/disable
+        enable_line = self.stepper_enable.lookup_enable(self.stepper_name)
+        if not enable_line.has_dedicated_enable():
+            enable_line.register_state_callback(self._handle_stepper_enable)
+            logging.info("Enabling virtual enable for '%s'", self.stepper_name)
         try:
             self.set_current(self.current, None)
             self.set_torque(self.torque, None)
@@ -95,6 +113,27 @@ class SERVO42C:
         self.mcu_s42c.set_register("SET_CURRENT", val, print_time)
         self.current = val * 0.2
         # Register commands
+
+    def get_motor_protect(self):
+        return self.mcu_s42c.get_register("PROTECT_STATE")
+
+    def get_motor_lock(self):
+        return self.mcu_s42c.get_register("LOCK_STATE")
+
+    def set_motor_lock(self, state, print_time):
+        val = state
+        self.mcu_s42c.set_register("SET_LOCK", val, print_time)
+
+    def set_enable(self, state, print_time):
+        val = 0
+        if state:
+            if self.get_motor_lock():
+                self.set_motor_lock(False, print_time)
+            val = 1
+        try:
+            self.mcu_s42c.set_register("SET_EN", val, print_time)
+        except self.printer.command_error as e:
+            logging.info("Servo42C %s failed to enable: %s", self.name, str(e))
 
     def set_torque(self, torque, print_time):
         val = round(torque)
