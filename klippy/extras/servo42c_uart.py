@@ -107,19 +107,18 @@ class MCU_S42C_uart_bitbang:
         self.mcu.register_config_callback(self.build_config)
 
     def build_config(self):
-        print("we are in build_config")
         baud = S42C_BAUD_RATE
         mcu_type = self.mcu.get_constants().get("MCU", "")
         if mcu_type.startswith("atmega") or mcu_type.startswith("at90usb"):
             baud = S42C_BAUD_RATE_AVR
         bit_ticks = self.mcu.seconds_to_clock(1.0 / baud)
         self.mcu.add_config_cmd(
-            "config_tmcuart oid=%d rx_pin=%s pull_up=%d tx_pin=%s bit_time=%d"
+            "config_mksuart oid=%d rx_pin=%s pull_up=%d tx_pin=%s bit_time=%d"
             % (self.oid, self.rx_pin, self.pullup, self.tx_pin, bit_ticks)
         )
         self.s42cuart_send_cmd = self.mcu.lookup_query_command(
-            "tmcuart_send oid=%c write=%*s read=%c",
-            "tmcuart_response oid=%c read=%*s",
+            "mksuart_send oid=%c write=%*s read=%c",
+            "mksuart_response oid=%c read=%*s",
             oid=self.oid,
             cq=self.cmd_queue,
             is_async=True,
@@ -145,47 +144,35 @@ class MCU_S42C_uart_bitbang:
         return instance_id
 
     def _calc_crc8(self, data):
-        # Generate a CRC8-ATM value for a bytearray
+        # Generate a CRC sum for a bytearray
         crc = 0
         for x in data:
             crc += x
         crc &= 0xFF
         return crc
 
-    def _add_serial_bits(self, data):
-        # Add serial start and stop bits to a message in a bytearray
-        out = 0
-        pos = 0
-        for d in data:
-            b = (d << 1) | 0x200
-            out |= b << pos
-            pos += 10
-        res = bytearray()
-        for i in range((pos + 7) // 8):
-            res.append((out >> (i * 8)) & 0xFF)
-        return res
-
     def _encode_read(self, addr, reg):
         # Generate a uart read register message
         msg = bytearray([addr, reg])
         msg.append(self._calc_crc8(msg))
-        return self._add_serial_bits(msg)
+        return msg
 
     def _encode_write(self, addr, reg, val):
         # Generate a uart write register message
         msg = bytearray([addr, reg])
         msg += val
         msg.append(self._calc_crc8(msg))
-        return self._add_serial_bits(msg)
+        return msg
 
-    def _decode_read(self, reg, data, response_len):
+    def _decode_read(self, data, response_len):
         # Extract a uart read response message
         if len(data) != response_len:
             return None
         mval = bytearray(data)
-        return mval[1:-1]
+
         crc = self._calc_crc8(mval[:-1])
         if crc != mval[-1]:
+            logging.info("CRC mismatch")
             return None
         return mval[1:-1]
 
@@ -194,7 +181,8 @@ class MCU_S42C_uart_bitbang:
             self.analog_mux.activate(instance_id)
         msg = self._encode_read(addr, reg)
         params = self.s42cuart_send_cmd.send([self.oid, msg, response_len])
-        return self._decode_read(reg, params["read"], response_len)
+        logging.info("params is %s", str(params))
+        return self._decode_read(params["read"], response_len)
 
     def reg_write(self, instance_id, addr, reg, val, print_time=None):
         minclock = 0
@@ -204,7 +192,8 @@ class MCU_S42C_uart_bitbang:
             self.analog_mux.activate(instance_id)
         msg = self._encode_write(addr, reg, bytearray(val))
         params = self.s42cuart_send_cmd.send([self.oid, msg, 3], minclock=minclock)
-        data = self._decode_read(reg, params["read"], 3)
+        logging.info("params is %s", str(params))
+        data = self._decode_read(params["read"], 3)
         if data is not None:
             return True
         return False
