@@ -263,6 +263,16 @@ const struct command_encoder encode_acknak PROGMEM = {
 
 enum { CF_NEED_SYNC=1<<0, CF_NEED_VALID=1<<1 };
 
+int_fast8_t check_seq(uint_fast8_t msgseq) {
+    if (msgseq != next_sequence) {
+        // Lost message - discard messages until it is retransmitted
+        command_sendf(&encode_acknak);
+        return -1;
+    }
+    next_sequence = ((msgseq + 1) & MESSAGE_SEQ_MASK) | MESSAGE_DEST;
+    return 1;
+}
+
 // Find the next complete message block
 int_fast8_t
 command_find_block(uint8_t *buf, uint_fast8_t buf_len, uint_fast8_t *pop_count)

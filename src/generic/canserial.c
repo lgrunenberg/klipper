@@ -39,6 +39,52 @@ static struct canbus_data {
     uint8_t receive_buf[192];
 } CanData;
 
+/* ====================== CONFIG ====================== */
+
+#define ISOTP_MAX_MESSAGE_SIZE   4095    /* ISO-TP maximum */
+#define CAN_FRAME_DATA_SIZE      8
+
+/* ====================== TYPES ====================== */
+
+typedef enum
+{
+    ISOTP_IDLE = 0,
+    ISOTP_RECEIVING
+} isotp_rx_state_t;
+
+typedef enum
+{
+    ISOTP_OK = 0,
+    ISOTP_IN_PROGRESS,
+    ISOTP_ERROR_OVERFLOW,
+    ISOTP_ERROR_SEQUENCE,
+    ISOTP_ERROR_FORMAT
+} isotp_status_t;
+
+typedef struct
+{
+    isotp_rx_state_t state;
+
+    uint16_t expected_length;
+    uint16_t received_length;
+
+    uint8_t next_sequence_number;
+
+    uint8_t buffer[ISOTP_MAX_MESSAGE_SIZE];
+
+} isotp_receiver_t;
+
+/* ====================== INIT ====================== */
+
+void isotp_receiver_init(isotp_receiver_t *ctx)
+{
+    ctx->state = ISOTP_IDLE;
+    ctx->expected_length = 0;
+    ctx->received_length = 0;
+    ctx->next_sequence_number = 1;
+}
+
+isotp_receiver_t crx;
 
 /****************************************************************
  * Data transmission over CAN
@@ -277,6 +323,90 @@ console_pop_input(int len)
     }
 }
 
+isotp_status_t isotp_receiver_process(isotp_receiver_t *ctx,
+                                       const uint8_t *data,
+                                       uint8_t len)
+{
+    if (len != CAN_FRAME_DATA_SIZE)
+        return ISOTP_ERROR_FORMAT;
+
+    uint8_t pci_type = (data[0] >> 4) & 0x0F;
+
+    switch (pci_type)
+    {
+        /* ================= SINGLE FRAME ================= */
+        case 0x0:
+        {
+            uint8_t payload_len = data[0] & 0x0F;
+
+            if (payload_len > 7)
+                return ISOTP_ERROR_FORMAT;
+
+            memcpy(ctx->buffer, &data[1], payload_len);
+
+            ctx->expected_length = payload_len;
+            ctx->received_length = payload_len;
+
+            return ISOTP_OK;
+        }
+
+        /* ================= FIRST FRAME ================= */
+        case 0x1:
+        {
+            uint16_t length = ((data[0] & 0x0F) << 8) | data[1];
+
+            if (length > ISOTP_MAX_MESSAGE_SIZE)
+                return ISOTP_ERROR_OVERFLOW;
+
+            ctx->expected_length = length;
+            ctx->received_length = 6; /* FF carries 6 bytes */
+            ctx->next_sequence_number = 1;
+            ctx->state = ISOTP_RECEIVING;
+
+            memcpy(ctx->buffer, &data[2], 6);
+
+            return ISOTP_IN_PROGRESS;
+        }
+
+        /* ================= CONSECUTIVE FRAME ================= */
+        case 0x2:
+        {
+            if (ctx->state != ISOTP_RECEIVING)
+                return ISOTP_ERROR_FORMAT;
+
+            uint8_t seq = data[0] & 0x0F;
+
+            if (seq != ctx->next_sequence_number)
+            {
+                isotp_receiver_init(ctx);
+                return ISOTP_ERROR_SEQUENCE;
+            }
+
+            ctx->next_sequence_number++;
+            if (ctx->next_sequence_number > 0x0F)
+                ctx->next_sequence_number = 0;
+
+            uint16_t remaining = ctx->expected_length - ctx->received_length;
+            uint8_t copy_len = (remaining >= 7) ? 7 : remaining;
+
+            memcpy(&ctx->buffer[ctx->received_length], &data[1], copy_len);
+
+            ctx->received_length += copy_len;
+
+            if (ctx->received_length >= ctx->expected_length)
+            {
+                ctx->state = ISOTP_IDLE;
+                return ISOTP_OK;
+            }
+
+            return ISOTP_IN_PROGRESS;
+        }
+
+        default:
+            return ISOTP_ERROR_FORMAT;
+    }
+}
+
 // Task to process incoming commands and admin messages
 void
 canserial_rx_task(void)
@@ -301,15 +431,22 @@ canserial_rx_task(void)
     }
 
     // Check for a complete message block and process it
-    uint_fast8_t rpos = readb(&CanData.receive_pos), pop_count;
-    int ret = command_find_block(CanData.receive_buf, rpos, &pop_count);
-    if (ret > 0)
-        command_dispatch(CanData.receive_buf, pop_count);
-    if (ret) {
-        console_pop_input(pop_count);
-        if (ret > 0)
-            command_send_ack();
+    uint_fast8_t rpos = readb(&CanData.receive_pos), pop_count = 0;
+    uint8_t *receive_buf = CanData.receive_buf;
+    while(rpos >= 8) {
+        isotp_status_t isotp_ret = isotp_receiver_process(&crx, receive_buf, rpos);
+        rpos -= 8;
+        receive_buf += 8;
+        pop_count += 8;
+        if (isotp_ret == ISOTP_OK) {
+            if(check_seq(crx.buffer[0])) {
+                command_dispatch(crx.buffer - 1, crx.received_length + 4);
+                command_send_ack();
+            }
+            isotp_receiver_init(&crx);
+        }
     }
+    console_pop_input(pop_count);
 }
 DECL_TASK(canserial_rx_task);
 

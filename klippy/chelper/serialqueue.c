@@ -114,6 +114,26 @@ struct serialqueue {
 #define DEBUG_QUEUE_SENT 100
 #define DEBUG_QUEUE_RECEIVE 100
 
+#define ISOTP_MAX_MESSAGE_SIZE     4095
+#define ISOTP_MAX_CAN_FRAMES       600   /* enough for max payload */
+#define CAN_FRAME_DATA_SIZE        8
+
+typedef struct
+{
+    uint8_t frames[ISOTP_MAX_CAN_FRAMES][CAN_FRAME_DATA_SIZE];
+    uint16_t frame_count;
+} isotp_sender_t;
+
+typedef enum
+{
+    ISOTP_SEND_OK = 0,
+    ISOTP_SEND_ERROR_OVERFLOW,
+    ISOTP_SEND_ERROR_INVALID_LENGTH
+} isotp_send_status_t;
+
+static isotp_sender_t g_isotp_sender;
+
+
 // Create a series of empty messages and add them to a list
 static void
 debug_queue_alloc(struct list_head *root, int count)
@@ -434,7 +454,9 @@ retransmit_event(struct serialqueue *sq, double eventtime)
     // Retransmit all pending messages
     uint8_t buf[MESSAGE_MAX * MAX_PENDING_BLOCKS + 1];
     int buflen = 0, first_buflen = 0;
-    buf[buflen++] = MESSAGE_SYNC;
+    if (sq->serial_fd_type != SQT_CAN) {
+        buf[buflen++] = MESSAGE_SYNC;
+    }
     struct queue_message *qm;
     list_for_each_entry(qm, &sq->sent_queue, node) {
         memcpy(&buf[buflen], qm->msg, qm->len);
@@ -514,6 +536,76 @@ build_and_send_command(struct serialqueue *sq, uint8_t *buf, int pending
     buf[len - MESSAGE_TRAILER_CRC] = crc >> 8;
     buf[len - MESSAGE_TRAILER_CRC+1] = crc & 0xff;
     buf[len - MESSAGE_TRAILER_SYNC] = MESSAGE_SYNC;
+
+    if (sq->serial_fd_type == SQT_CAN) {
+            // Strip length byte, checksum and sync byte as it is not needed by ISOTP
+            uint8_t *payload = &buf[MESSAGE_POS_SEQ];
+            uint16_t isotp_len = len - MESSAGE_TRAILER_SIZE - 1;
+
+            if (isotp_len > ISOTP_MAX_MESSAGE_SIZE)
+                return -ISOTP_SEND_ERROR_INVALID_LENGTH;
+
+            memset(&g_isotp_sender, 0, sizeof(g_isotp_sender));
+
+            /* ================= SINGLE FRAME ================= */
+            if (isotp_len <= 7)
+            {
+                g_isotp_sender.frames[0][0] = (0x0 << 4) | (isotp_len & 0x0F);
+                memcpy(&g_isotp_sender.frames[0][1], payload, isotp_len);
+
+                g_isotp_sender.frame_count = 1;
+            }
+
+            /* ================= MULTI FRAME ================= */
+            else {
+                uint16_t offset = 0;
+                uint16_t frame_index = 0;
+
+                /* ---------- FIRST FRAME ---------- */
+                g_isotp_sender.frames[frame_index][0] =
+                    (0x1 << 4) | ((isotp_len >> 8) & 0x0F);
+                g_isotp_sender.frames[frame_index][1] =
+                    (isotp_len & 0xFF);
+
+                memcpy(&g_isotp_sender.frames[frame_index][2],
+                    &payload[0],
+                    6);
+
+                offset += 6;
+                frame_index++;
+
+                /* ---------- CONSECUTIVE FRAMES ---------- */
+                uint8_t sequence_number = 1;
+
+                while (offset < isotp_len)
+                {
+                    if (frame_index >= ISOTP_MAX_CAN_FRAMES)
+                        return -ISOTP_SEND_ERROR_OVERFLOW;
+
+                    uint16_t remaining = isotp_len - offset;
+                    uint8_t copy_len = (remaining >= 7) ? 7 : remaining;
+
+                    g_isotp_sender.frames[frame_index][0] =
+                        (0x2 << 4) | (sequence_number & 0x0F);
+
+                    memcpy(&g_isotp_sender.frames[frame_index][1],
+                        &payload[offset],
+                        copy_len);
+
+                    offset += copy_len;
+                    frame_index++;
+
+                    sequence_number++;
+                    if (sequence_number > 0x0F)
+                        sequence_number = 0;
+                }
+
+                g_isotp_sender.frame_count = frame_index;
+            }
+        len = g_isotp_sender.frame_count * 8;
+        memmove(buf, g_isotp_sender.frames, len);
+
+    }
 
     // Store message block
     double idletime = eventtime > sq->idle_time ? eventtime : sq->idle_time;
